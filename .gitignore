@@ -87,3 +87,9 @@ data
 
 # vim
 *.swp
+
+
+# roy
+GibsonEnv/
+habitat-sim/
+video/

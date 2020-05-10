@@ -124,6 +124,7 @@ class RolloutStorage:
                 )
                 gae = delta + gamma * tau * self.masks[step + 1] * gae
                 self.returns[step] = gae + self.value_preds[step]
+                # print(self.returns[step])
         else:
             self.returns[self.step] = next_value
             for step in reversed(range(self.step)):
