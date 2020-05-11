@@ -52,8 +52,13 @@ class PPO_(nn.Module):
                     old_action_log_probs_batch,
                     adv_targ,
                 ) = mini_batch
+                # print(observations_batch["depth"].size())
+                # print(recurrent_hidden_states_batch.size())
+                # print(actions_batch.size())
+                # print(return_batch.size())
                 distributions_entropy, actions_log_probs, value = self.actor_critic.evaluate_value(observations_batch, 
-                                                                                                   actions_batch)
+                                                                                                   actions_batch,
+                                                                                                   recurrent_hidden_states_batch)
                 # print("return_batch:", return_batch)
                 # print("value:", value)
                 # actions_loss

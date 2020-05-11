@@ -60,27 +60,32 @@ class PPOTrainer_(BaseRLTrainer):
         print(self.envs.observation_spaces[0])
         print(self.envs.action_spaces[0])
         self.actor_critic = PointNavBaselinePolicy_(
-                            observation_spaces=self.envs.observation_spaces[0], 
-                            feature_dim=50, 
-                            action_spaces=4
+                            cnn_parameter={"observation_spaces":self.envs.observation_spaces[0], "feature_dim":50},
+                            rnn_parameter={"intput_dim":0, "hidden_dim":self.config.RL.PPO.hidden_size, "n_layer":1},
+                            actor_parameter={"action_spaces":4, },
+                            critic_parameter={},
                             )
         self.agent = PPO_(self.actor_critic,
                           self.config, )
 
-    def _collect_rollout_step(self, hidden_states):
+    def _collect_rollout_step(self):
         '''
         obss :   "rgb"
                  "depth"
                  "pointgoal_with_gps_compass"
         '''
         obs = {k:v[self.rollout.step] for k, v in self.rollout.observations.items()}
-        
+        hidden_states = self.rollout.recurrent_hidden_states[self.rollout.step]
         ### PASS DATA
         with torch.no_grad():
-            actions_log_probs, actions, value, distributions = self.actor_critic.act(obs)
-            print("distributions:", distributions)
-            print("actions_log_probs:", actions_log_probs)
-            print("actions:", actions)
+            (actions_log_probs, 
+             actions, 
+             value, 
+             distributions, 
+             rnn_hidden_state) = (self.actor_critic.act(obs, hidden_states))
+            # print("distributions:", distributions)
+            # print("actions_log_probs:", actions_log_probs)
+            # print("actions:", actions)
 
         ### PASS ENV
         res = self.envs.step([action.item() for action in actions])
@@ -88,24 +93,26 @@ class PPOTrainer_(BaseRLTrainer):
         ### Process
         observations, rewards, dones, infos = [list(x) for x in zip(*res)]
         observations = batch_obs(observations, self.device)
-        rewards = torch.tensor(rewards, dtype=torch.float, device=self.device)
-        dones   = torch.tensor([0 if done else 1 for done in dones], dtype=torch.float, device=self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float, device=self.device).unsqueeze(-1)
+        inverse_dones   = torch.tensor([[0] if done else [1] for done in dones], dtype=torch.float, device=self.device)
         self.rollout.insert(
                             observations,
-                            hidden_states,
+                            rnn_hidden_state,
                             actions,
                             actions_log_probs,
                             value,
                             rewards,
-                            dones,
+                            inverse_dones,
                             )
-        print("rewards:", rewards)
+        # print("rewards:", rewards)
+        print(infos)
         return 
 
     def _update_agent(self):
         with torch.no_grad():
             last_obs = {k:v[self.rollout.step] for k, v in self.rollout.observations.items()}
-            next_value = self.actor_critic.get_value(last_obs).detach()
+            hidden_states = self.rollout.recurrent_hidden_states[self.rollout.step]
+            next_value = self.actor_critic.get_value(last_obs, hidden_states).detach()
 
         self.rollout.compute_returns(next_value, 
                                      self.config.RL.PPO.use_gae, 
@@ -117,22 +124,17 @@ class PPOTrainer_(BaseRLTrainer):
     def train(self) -> None:
         #### init
         obs = self.envs.reset()
-        hidden_states = torch.zeros(
-            1,
-            self.config.NUM_PROCESSES,
-            self.config.RL.PPO.hidden_size,
-            device=self.device,
-        )
-        #### 先暫存一個
+        #### 先暫存一個 obs & hidden_states
         batch = batch_obs(obs, device=self.device)
         for sensor in self.rollout.observations:
             self.rollout.observations[sensor][0].copy_(batch[sensor])
+        # self.rollout.recurrent_hidden_states[0] = self.actor_critic.get_rnn_hidden_states()
         #### 開始訓練
         for epoch in range(self.config.NUM_UPDATES):
             #### 蒐集rollout
             print("=== collect rollout ===")
             for step in range(self.config.RL.PPO.num_steps):
-                self._collect_rollout_step(hidden_states)
+                self._collect_rollout_step()
             #### 更新
             self._update_agent()
 

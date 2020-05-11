@@ -162,8 +162,11 @@ class RolloutStorage:
                         self.observations[sensor][: self.step, ind]
                     )
 
+                # recurrent_hidden_states_batch.append(
+                #     self.recurrent_hidden_states[0, :, ind]
+                # )
                 recurrent_hidden_states_batch.append(
-                    self.recurrent_hidden_states[0, :, ind]
+                    self.recurrent_hidden_states[: self.step, 0, ind]
                 )
 
                 actions_batch.append(self.actions[: self.step, ind])
@@ -196,9 +199,13 @@ class RolloutStorage:
             adv_targ = torch.stack(adv_targ, 1)
 
             # States is just a (num_recurrent_layers, N, -1) tensor
+            # recurrent_hidden_states_batch = torch.stack(
+            #     recurrent_hidden_states_batch, 1
+            # )
             recurrent_hidden_states_batch = torch.stack(
-                recurrent_hidden_states_batch, 1
+                recurrent_hidden_states_batch, 0
             )
+            recurrent_hidden_states_batch = recurrent_hidden_states_batch.view(1, -1, recurrent_hidden_states_batch.size(2))
 
             # Flatten the (T, N, ...) tensors to (T * N, ...)
             for sensor in observations_batch:
@@ -215,7 +222,6 @@ class RolloutStorage:
                 T, N, old_action_log_probs_batch
             )
             adv_targ = self._flatten_helper(T, N, adv_targ)
-
             yield (
                 observations_batch,
                 recurrent_hidden_states_batch,
