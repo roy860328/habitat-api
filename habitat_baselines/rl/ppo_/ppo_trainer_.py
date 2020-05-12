@@ -68,7 +68,7 @@ class PPOTrainer_(BaseRLTrainer):
         self.agent = PPO_(self.actor_critic,
                           self.config, )
 
-    def _collect_rollout_step(self):
+    def _collect_rollout_step(self, rewards_record, count):
         '''
         obss :   "rgb"
                  "depth"
@@ -94,6 +94,7 @@ class PPOTrainer_(BaseRLTrainer):
         observations, rewards, dones, infos = [list(x) for x in zip(*res)]
         observations = batch_obs(observations, self.device)
         rewards = torch.tensor(rewards, dtype=torch.float, device=self.device).unsqueeze(-1)
+        dones   = torch.tensor(dones, dtype=torch.float, device=self.device)
         inverse_dones   = torch.tensor([[0] if done else [1] for done in dones], dtype=torch.float, device=self.device)
         self.rollout.insert(
                             observations,
@@ -105,8 +106,13 @@ class PPOTrainer_(BaseRLTrainer):
                             inverse_dones,
                             )
         # print("rewards:", rewards)
-        print(infos)
-        return 
+        # print(infos)
+        if rewards_record is None:
+            rewards_record, count = rewards, dones
+        else:
+            rewards_record += rewards
+            count = dones
+        return rewards_record, count
 
     def _update_agent(self):
         with torch.no_grad():
@@ -121,23 +127,43 @@ class PPOTrainer_(BaseRLTrainer):
         loss = self.agent.update(self.rollout)
         self.rollout.after_update()
 
+        return loss
+
     def train(self) -> None:
         #### init
         obs = self.envs.reset()
-        #### 先暫存一個 obs & hidden_states
+        #### 先暫存一個 obs
         batch = batch_obs(obs, device=self.device)
         for sensor in self.rollout.observations:
             self.rollout.observations[sensor][0].copy_(batch[sensor])
-        # self.rollout.recurrent_hidden_states[0] = self.actor_critic.get_rnn_hidden_states()
+        #### Para
+        rewards_record = None
+        count = None
         #### 開始訓練
-        for epoch in range(self.config.NUM_UPDATES):
-            #### 蒐集rollout
-            print("=== collect rollout ===")
-            for step in range(self.config.RL.PPO.num_steps):
-                self._collect_rollout_step()
-            #### 更新
-            self._update_agent()
-
+        with TensorboardWriter(
+            "tb_example", flush_secs=self.flush_secs
+        ) as writer:
+            for epoch in range(self.config.NUM_UPDATES):
+                #### 蒐集rollout
+                print("=== collect rollout ===")
+                for step in range(self.config.RL.PPO.num_steps):
+                    rewards_record, count = self._collect_rollout_step(rewards_record, count)
+                #### 更新
+                loss = self._update_agent()
+                #### LOGGER
+                writer.add_scalars(
+                    "loss", loss, epoch*self.envs.num_envs
+                )
+                writer.add_scalar(
+                    "reward", rewards_record.sum(), epoch*self.envs.num_envs
+                )
+                writer.add_scalar(
+                    "count", count.sum(), epoch*self.envs.num_envs
+                )
+                print("rewards_record:", rewards_record.sum())
+                print("count:", count.sum())
+                rewards_record = None
+                count = None
         self.envs.close()
 
     def _eval_checkpoint(self, checkpoint_path: str, writer: TensorboardWriter, checkpoint_index: int = 0, ) -> None:

@@ -65,6 +65,8 @@ class PPO_(nn.Module):
                 ratio = torch.exp(actions_log_probs - old_action_log_probs_batch)
                 surr1 = ratio * adv_targ
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
+                print(surr1.mean())
+                print(surr2.mean())
                 actions_loss = -1 * torch.min(surr1 - surr2).mean()
                 # values_loss
                 values_loss  = 0.5 * (return_batch - value).pow(2).mean()
@@ -77,8 +79,12 @@ class PPO_(nn.Module):
                 self.optimizer.step()
 
                 loss += total_loss.item()
-                print("actions_loss:", actions_loss)
-                print("values_loss:", values_loss)
-                print("distributions_entropy:", distributions_entropy)
         print("loss:", loss)
-        return loss
+        print("actions_loss:", actions_loss)
+        print("values_loss:", values_loss)
+        print("distributions_entropy:", distributions_entropy)
+        loss_dict = {"loss":torch.tensor(loss, dtype=torch.float),
+                     "actions_loss":torch.tensor(actions_loss, dtype=torch.float),
+                     "values_loss":torch.tensor(values_loss, dtype=torch.float),
+                     "distributions_entropy":torch.tensor(distributions_entropy, dtype=torch.float),}
+        return loss_dict
