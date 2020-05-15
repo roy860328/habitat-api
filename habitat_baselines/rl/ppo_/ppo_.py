@@ -56,24 +56,28 @@ class PPO_(nn.Module):
                 # print(recurrent_hidden_states_batch.size())
                 # print(actions_batch.size())
                 # print(return_batch.size())
-                distributions_entropy, actions_log_probs, value = self.actor_critic.evaluate_value(observations_batch, 
-                                                                                                   actions_batch,
-                                                                                                   recurrent_hidden_states_batch)
+                distributions_entropy, actions_log_probs, value = \
+                    self.actor_critic.evaluate_value(observations_batch, 
+                                                     actions_batch,
+                                                     recurrent_hidden_states_batch,
+                                                     masks_batch)
                 # print("return_batch:", return_batch)
                 # print("value:", value)
+
                 # actions_loss
                 ratio = torch.exp(actions_log_probs - old_action_log_probs_batch)
                 surr1 = ratio * adv_targ
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
-                print(surr1.mean())
-                print(surr2.mean())
-                actions_loss = -1 * torch.min(surr1 - surr2).mean()
+                actions_loss = -1 * torch.min(surr1, surr2).mean()
+                print(ratio[0])
+                print(surr1[0])
+
                 # values_loss
                 values_loss  = 0.5 * (return_batch - value).pow(2).mean()
                 # optimizer
                 self.optimizer.zero_grad()
                 # total_loss
-                total_loss = (actions_loss * self.value_loss_coef + values_loss - distributions_entropy * self.entropy_coef)
+                total_loss = (actions_loss + values_loss * self.value_loss_coef - distributions_entropy * self.entropy_coef)
                 total_loss.backward()
 
                 self.optimizer.step()
@@ -83,8 +87,8 @@ class PPO_(nn.Module):
         print("actions_loss:", actions_loss)
         print("values_loss:", values_loss)
         print("distributions_entropy:", distributions_entropy)
-        loss_dict = {"loss":torch.tensor(loss, dtype=torch.float),
-                     "actions_loss":torch.tensor(actions_loss, dtype=torch.float),
-                     "values_loss":torch.tensor(values_loss, dtype=torch.float),
-                     "distributions_entropy":torch.tensor(distributions_entropy, dtype=torch.float),}
+        loss_dict = {"loss":loss,
+                     "actions_loss":actions_loss,
+                     "values_loss":values_loss,
+                     "distributions_entropy":distributions_entropy.detach(),}
         return loss_dict

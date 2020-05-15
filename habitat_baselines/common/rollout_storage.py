@@ -161,10 +161,11 @@ class RolloutStorage:
                     observations_batch[sensor].append(
                         self.observations[sensor][: self.step, ind]
                     )
-
+                ## ori
                 # recurrent_hidden_states_batch.append(
                 #     self.recurrent_hidden_states[0, :, ind]
                 # )
+                ## aft
                 recurrent_hidden_states_batch.append(
                     self.recurrent_hidden_states[: self.step, 0, ind]
                 )
@@ -199,9 +200,11 @@ class RolloutStorage:
             adv_targ = torch.stack(adv_targ, 1)
 
             # States is just a (num_recurrent_layers, N, -1) tensor
+            ## ori
             # recurrent_hidden_states_batch = torch.stack(
             #     recurrent_hidden_states_batch, 1
             # )
+            ## aft
             recurrent_hidden_states_batch = torch.stack(
                 recurrent_hidden_states_batch, 0
             )

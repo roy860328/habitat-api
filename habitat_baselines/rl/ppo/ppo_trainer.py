@@ -343,8 +343,6 @@ class PPOTrainer(BaseRLTrainer):
             self.config.TENSORBOARD_DIR, flush_secs=self.flush_secs
         ) as writer:
             for update in range(self.config.NUM_UPDATES):
-                print("\n")
-                print(update)
                 if ppo_cfg.use_linear_lr_decay:
                     lr_scheduler.step()
 
@@ -364,7 +362,6 @@ class PPOTrainer(BaseRLTrainer):
                     pth_time += delta_pth_time
                     env_time += delta_env_time
                     count_steps += delta_steps
-                print(456)
                 (
                     delta_pth_time,
                     value_loss,

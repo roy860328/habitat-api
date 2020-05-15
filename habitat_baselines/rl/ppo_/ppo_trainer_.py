@@ -60,33 +60,33 @@ class PPOTrainer_(BaseRLTrainer):
         print(self.envs.observation_spaces[0])
         print(self.envs.action_spaces[0])
         self.actor_critic = PointNavBaselinePolicy_(
-                            cnn_parameter={"observation_spaces":self.envs.observation_spaces[0], "feature_dim":50},
-                            rnn_parameter={"intput_dim":0, "hidden_dim":self.config.RL.PPO.hidden_size, "n_layer":1},
+                            cnn_parameter={"observation_spaces":self.envs.observation_spaces[0], "feature_dim":self.config.RL.PPO.cnn_output_size},
+                            rnn_parameter={"input_dim":0, "hidden_dim":self.config.RL.PPO.hidden_size, "n_layer":1},
                             actor_parameter={"action_spaces":4, },
                             critic_parameter={},
                             )
         self.agent = PPO_(self.actor_critic,
                           self.config, )
 
-    def _collect_rollout_step(self, rewards_record, count):
+    def _collect_rollout_step(self, rewards_record, count, metrics):
         '''
         obss :   "rgb"
                  "depth"
                  "pointgoal_with_gps_compass"
         '''
-        obs = {k:v[self.rollout.step] for k, v in self.rollout.observations.items()}
-        hidden_states = self.rollout.recurrent_hidden_states[self.rollout.step]
         ### PASS DATA
         with torch.no_grad():
+            obs = {k:v[self.rollout.step] for k, v in self.rollout.observations.items()}
+            hidden_states = self.rollout.recurrent_hidden_states[self.rollout.step]
+            inverse_dones = self.rollout.masks[self.rollout.step]
             (actions_log_probs, 
              actions, 
              value, 
              distributions, 
-             rnn_hidden_state) = (self.actor_critic.act(obs, hidden_states))
-            # print("distributions:", distributions)
-            # print("actions_log_probs:", actions_log_probs)
-            # print("actions:", actions)
-
+             rnn_hidden_state) = (self.actor_critic.act(obs, hidden_states, inverse_dones))
+        # print("distributions:", distributions)
+        # print("max distributions:", torch.max(distributions, 1)[1])
+        # print("actions:", actions)
         ### PASS ENV
         res = self.envs.step([action.item() for action in actions])
 
@@ -106,19 +106,26 @@ class PPOTrainer_(BaseRLTrainer):
                             inverse_dones,
                             )
         # print("rewards:", rewards)
-        # print(infos)
+        # print("dones:", dones)
         if rewards_record is None:
             rewards_record, count = rewards, dones
         else:
             rewards_record += rewards
-            count = dones
-        return rewards_record, count
+            count += dones
+        for i, done in enumerate(dones):
+            if done:
+                for k, v in infos[i].items():
+                    metrics[k] = (metrics[k]+v)/2
+        return rewards_record, count, metrics
 
     def _update_agent(self):
         with torch.no_grad():
             last_obs = {k:v[self.rollout.step] for k, v in self.rollout.observations.items()}
             hidden_states = self.rollout.recurrent_hidden_states[self.rollout.step]
-            next_value = self.actor_critic.get_value(last_obs, hidden_states).detach()
+            inverse_dones = self.rollout.masks[self.rollout.step]
+            next_value = self.actor_critic.get_value(last_obs, 
+                                                     hidden_states, 
+                                                     inverse_dones).detach()
 
         self.rollout.compute_returns(next_value, 
                                      self.config.RL.PPO.use_gae, 
@@ -139,6 +146,7 @@ class PPOTrainer_(BaseRLTrainer):
         #### Para
         rewards_record = None
         count = None
+        metrics = defaultdict(float)
         #### 開始訓練
         with TensorboardWriter(
             "tb_example", flush_secs=self.flush_secs
@@ -147,21 +155,26 @@ class PPOTrainer_(BaseRLTrainer):
                 #### 蒐集rollout
                 print("=== collect rollout ===")
                 for step in range(self.config.RL.PPO.num_steps):
-                    rewards_record, count = self._collect_rollout_step(rewards_record, count)
+                    rewards_record, count, metrics = self._collect_rollout_step(rewards_record, count, metrics)
                 #### 更新
                 loss = self._update_agent()
                 #### LOGGER
                 writer.add_scalars(
                     "loss", loss, epoch*self.envs.num_envs
                 )
-                writer.add_scalar(
-                    "reward", rewards_record.sum(), epoch*self.envs.num_envs
+                writer.add_scalars(
+                    "metrics", metrics, epoch*self.envs.num_envs
                 )
                 writer.add_scalar(
-                    "count", count.sum(), epoch*self.envs.num_envs
+                    "reward", rewards_record.sum()/self.envs.num_envs, epoch
                 )
-                print("rewards_record:", rewards_record.sum())
-                print("count:", count.sum())
+                writer.add_scalar(
+                    "count", count.sum()/self.envs.num_envs, epoch
+                )
+                if epoch%(1) == 0:
+                    print("rewards_record:", rewards_record.sum())
+                    print("count:", count.sum())
+                    print("metrics:", metrics)
                 rewards_record = None
                 count = None
         self.envs.close()
