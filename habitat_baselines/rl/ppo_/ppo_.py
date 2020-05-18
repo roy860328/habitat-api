@@ -23,6 +23,8 @@ class PPO_(nn.Module):
         self.value_loss_coef = self.config.RL.PPO.value_loss_coef
         self.entropy_coef = self.config.RL.PPO.entropy_coef
 
+        self.reconstruction_function = torch.nn.MSELoss()
+
     # mainly for self.actor_critic.act()
     def forward(self, *x):
         raise NotImplementedError
@@ -61,6 +63,8 @@ class PPO_(nn.Module):
                                                      actions_batch,
                                                      recurrent_hidden_states_batch,
                                                      masks_batch)
+                depth_img = self.actor_critic.evaluate_decoder(observations_batch, 
+                                                               )
                 # print("return_batch:", return_batch)
                 # print("value:", value)
 
@@ -74,10 +78,18 @@ class PPO_(nn.Module):
 
                 # values_loss
                 values_loss  = 0.5 * (return_batch - value).pow(2).mean()
+
+                # depth img predict loss
+                depth_img_loss = self.reconstruction_function(depth_img, 
+                                                              observations_batch["depth"])
+
                 # optimizer
                 self.optimizer.zero_grad()
                 # total_loss
-                total_loss = (actions_loss + values_loss * self.value_loss_coef - distributions_entropy * self.entropy_coef)
+                total_loss = (actions_loss
+                              + values_loss * self.value_loss_coef 
+                              - distributions_entropy * self.entropy_coef
+                              + depth_img_loss)
                 total_loss.backward()
 
                 self.optimizer.step()
@@ -87,8 +99,11 @@ class PPO_(nn.Module):
         print("actions_loss:", actions_loss)
         print("values_loss:", values_loss)
         print("distributions_entropy:", distributions_entropy)
+        print("depth_img_loss:", depth_img_loss)
         loss_dict = {"loss":loss,
                      "actions_loss":actions_loss,
                      "values_loss":values_loss,
-                     "distributions_entropy":distributions_entropy.detach(),}
+                     "distributions_entropy":distributions_entropy.detach(),
+                     "depth_img_loss":depth_img_loss,
+                     }
         return loss_dict

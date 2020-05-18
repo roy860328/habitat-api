@@ -61,6 +61,7 @@ class PPOTrainer_(BaseRLTrainer):
         print(self.envs.action_spaces[0])
         self.actor_critic = PointNavBaselinePolicy_(
                             cnn_parameter={"observation_spaces":self.envs.observation_spaces[0], "feature_dim":self.config.RL.PPO.cnn_output_size},
+                            depth_decoder_parameter={},
                             rnn_parameter={"input_dim":0, "hidden_dim":self.config.RL.PPO.hidden_size, "n_layer":1},
                             actor_parameter={"action_spaces":4, },
                             critic_parameter={},
@@ -117,6 +118,14 @@ class PPOTrainer_(BaseRLTrainer):
                 for k, v in infos[i].items():
                     metrics[k] = (metrics[k]+v)/2
         return rewards_record, count, metrics
+
+    def _save_checkpoint(self, checkpoint_name):
+        checkpoint_dict = {"state_dict": self.agent.state_dict(),
+                           "config"    : self.config,
+                           }
+        torch.save(checkpoint_dict, 
+                   os.path.join(self.config.CHECKPOINT_FOLDER, checkpoint_name),
+                   )
 
     def _update_agent(self):
         with torch.no_grad():
@@ -175,8 +184,10 @@ class PPOTrainer_(BaseRLTrainer):
                     print("rewards_record:", rewards_record.sum())
                     print("count:", count.sum())
                     print("metrics:", metrics)
-                rewards_record = None
-                count = None
+                    rewards_record = None
+                    count = None
+                if epoch%self.config.CHECKPOINT_INTERVAL == 0:
+                    self._save_checkpoint(f"checkpoint.{epoch}.pth")
         self.envs.close()
 
     def _eval_checkpoint(self, checkpoint_path: str, writer: TensorboardWriter, checkpoint_index: int = 0, ) -> None:

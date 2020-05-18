@@ -106,8 +106,6 @@ class RNN_encoder(nn.Module):
 
         return out.squeeze(0), rnn_hidden_state
 
-
-
 class CNN_encoder(nn.Module):
     """docstring for CNN_encoder"""
 
@@ -128,9 +126,11 @@ class CNN_encoder(nn.Module):
                    nn.ReLU(True),
                    nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2),
                    nn.ReLU(True),
+        )
+        self.flatten = nn.Sequential(
                    Flatten(),
                    nn.Linear(15*15*256, feature_dim),
-                   nn.ReLU(True),
+                   # nn.ReLU(True),
         )
 
         self._init_weight()
@@ -143,12 +143,56 @@ class CNN_encoder(nn.Module):
                 nn.init.kaiming_normal_(layer.weight, nn.init.calculate_gain("relu"))
                 if layer.bias is not None:
                     nn.init.constant_(layer.bias, val=0)
+        for layer in self.flatten:
+            if isinstance(layer, (nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(layer.weight, nn.init.calculate_gain("relu"))
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, val=0)
 
     def forward(self, obs):
         depth = obs["depth"]
         depth = depth.permute(0, 3, 1, 2)
-        feature = self.cnn(depth)
-        return feature
+        feature_map = self.cnn(depth)
+        feature     = self.flatten(feature_map)
+        return feature_map, feature
+
+class CNN_decoder(nn.Module):
+    """docstring for CNN_encoder"""
+
+    def __init__(self, ):
+        '''
+        Dict(depth:Box(256, 256, 1), pointgoal_with_gps_compass:Box(2,), rgb:Box(256, 256, 3))
+        '''
+        super().__init__()
+        self._setup_net()
+    
+    def _setup_net(self,):
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, stride=2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(in_channels=128, out_channels=64, kernel_size=3, stride=2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(in_channels=64, out_channels=32, kernel_size=3, stride=2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(in_channels=32, out_channels=1, kernel_size=3, stride=2, output_padding=1),
+            nn.Tanh(),
+        )
+        self._init_weight()
+        print(self.decoder)
+        _print_model_parameters(self.decoder)
+
+    def _init_weight(self):
+        for layer in self.decoder:
+            if isinstance(layer, (nn.ConvTranspose2d, nn.Linear)):
+                nn.init.kaiming_normal_(layer.weight, nn.init.calculate_gain("relu"))
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, val=0)
+
+    def forward(self, feature):
+        depth_predict = self.decoder(feature)
+        depth_predict = depth_predict.permute(0, 2, 3, 1)
+        return depth_predict
+
 
 class CustomCategorical(torch.distributions.Categorical):
     def sample(self, sample_shape=torch.Size()):
@@ -164,11 +208,12 @@ class CustomCategorical(torch.distributions.Categorical):
         )
 
 class PointNavBaselinePolicy_(nn.Module):
-    def __init__(self, cnn_parameter, rnn_parameter, actor_parameter, critic_parameter):
+    def __init__(self, cnn_parameter, depth_decoder_parameter, rnn_parameter, actor_parameter, critic_parameter):
         super().__init__()
         self.cnn = CNN_encoder(rgb_input=cnn_parameter["observation_spaces"].spaces["depth"].shape[2], 
                                feature_dim=cnn_parameter["feature_dim"]
                                )
+        self.cnn_decoder = CNN_decoder()
         input_dim = cnn_parameter["feature_dim"] + cnn_parameter["observation_spaces"].spaces["pointgoal_with_gps_compass"].shape[0]
         self.rnn = RNN_encoder(input_dim=input_dim, 
                                hidden_dim=rnn_parameter["hidden_dim"], 
@@ -211,8 +256,13 @@ class PointNavBaselinePolicy_(nn.Module):
         value = self.critic(feature)
         return distributions_entropy, actions_log_probs, value
 
+    def evaluate_decoder(self, obs):
+        feature_map, _ = self.cnn(obs)
+        depth_img = self.cnn_decoder(feature_map)
+        return depth_img
+
     def _run_cnn_rnn(self, obs, rnn_hidden_state, masks):
-        feature = self.cnn(obs)
+        _, feature = self.cnn(obs)
         feature = self._cat_pointgoal_with_gps_compass(obs, feature)
 
         feature, rnn_hidden_state = self.rnn(feature, rnn_hidden_state, masks)
