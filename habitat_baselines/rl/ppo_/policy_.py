@@ -156,8 +156,12 @@ class CNN_encoder(nn.Module):
         feature     = self.flatten(feature_map)
         return feature_map, feature
 
+"""Splitnet"""
+
+"""Splitnet visaul decoder"""
+
 class CNN_decoder(nn.Module):
-    """docstring for CNN_encoder"""
+    """Splitnet visaul decoder"""
 
     def __init__(self, ):
         '''
@@ -193,6 +197,82 @@ class CNN_decoder(nn.Module):
         depth_predict = depth_predict.permute(0, 2, 3, 1)
         return depth_predict
 
+""" Motion Auxiliary Tasks """
+
+class ActionAuxiliary(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        """
+        input : feature * 2
+        output: action
+        """
+        super().__init__()
+        self._setup_net(input_dim, output_dim)
+    
+    def _setup_net(self, feature_dim, action_out_size):
+        self.predict_action = nn.Sequential(
+                   nn.Linear(feature_dim, 64),
+                   nn.ReLU(True),
+                   nn.Linear(64, action_out_size),
+                   # nn.Sigmoid(),
+        )
+        self._init_weight()
+
+    def _init_weight(self):
+        for layer in self.predict_action:
+            if isinstance(layer, (nn.Linear)):
+                nn.init.kaiming_normal_(layer.weight, nn.init.calculate_gain("relu"))
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, val=0)
+    def forward(self, feature):
+        """
+        feature_t_1 : feature t-1
+        feature_t_2 : feature t
+        """
+        feature = feature.squeeze(0)
+        feature_t_1 = feature[:-1]
+        feature_t_2 = feature[1:]
+        cat_feature = torch.cat([feature_t_1, feature_t_2], dim=-1)
+        action = self.predict_action(cat_feature)
+        return action
+
+
+class FeatureAuxiliary(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        """
+        input : feature + action
+        output: next feature
+        """
+        super().__init__()
+        self._setup_net(input_dim, output_dim)
+    
+    def _setup_net(self, feature_dim, next_feature_dim):
+        self.predict_next_feature = nn.Sequential(
+                   nn.Linear(feature_dim, 64),
+                   nn.ReLU(True),
+                   nn.Linear(64, next_feature_dim),
+                   # nn.Sigmoid(),
+        )
+        self._init_weight()
+
+    def _init_weight(self):
+        for layer in self.predict_next_feature:
+            if isinstance(layer, (nn.Linear)):
+                nn.init.kaiming_normal_(layer.weight, nn.init.calculate_gain("relu"))
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, val=0)
+
+    def forward(self, feature, action):
+        """
+        input : feature + action
+        output: next feature
+        """
+        feature = feature.squeeze(0)
+        cat_input = torch.cat([feature[:-1], action[:-1]], dim=-1)
+        next_feature = self.predict_next_feature(cat_input)
+        return next_feature
+
+
+"""Splitnet"""
 
 class CustomCategorical(torch.distributions.Categorical):
     def sample(self, sample_shape=torch.Size()):
@@ -210,20 +290,27 @@ class CustomCategorical(torch.distributions.Categorical):
 class PointNavBaselinePolicy_(nn.Module):
     def __init__(self, cnn_parameter, depth_decoder_parameter, rnn_parameter, actor_parameter, critic_parameter):
         super().__init__()
-        self.cnn = CNN_encoder(rgb_input=cnn_parameter["observation_spaces"].spaces["depth"].shape[2], 
-                               feature_dim=cnn_parameter["feature_dim"]
-                               )
-        self.cnn_decoder = CNN_decoder()
-        input_dim = cnn_parameter["feature_dim"] + cnn_parameter["observation_spaces"].spaces["pointgoal_with_gps_compass"].shape[0]
-        self.rnn = RNN_encoder(input_dim=input_dim, 
-                               hidden_dim=rnn_parameter["hidden_dim"], 
-                               n_layer=rnn_parameter["n_layer"],
-                              )
-
-        self.actor = Actor(input_dim=rnn_parameter["hidden_dim"], 
-                           output_dim=actor_parameter["action_spaces"])
-        self.critic = Critic(input_dim=rnn_parameter["hidden_dim"], 
-                             )
+        self.cnn               = CNN_encoder(rgb_input=cnn_parameter["observation_spaces"].spaces["depth"].shape[2], 
+                                             feature_dim=cnn_parameter["feature_dim"]
+                                             )
+        self.cnn_decoder       = CNN_decoder(
+                                             )
+        input_dim              = cnn_parameter["feature_dim"] + cnn_parameter["observation_spaces"].spaces["pointgoal_with_gps_compass"].shape[0]
+        self.rnn               = RNN_encoder(input_dim=input_dim, 
+                                             hidden_dim=rnn_parameter["hidden_dim"], 
+                                             n_layer=rnn_parameter["n_layer"],
+                                             )
+        self.action_auxiliary  = ActionAuxiliary(rnn_parameter["hidden_dim"]*2,
+                                                 actor_parameter["action_spaces"]
+                                                 )
+        self.feature_auxiliary = FeatureAuxiliary(rnn_parameter["hidden_dim"] + actor_parameter["action_spaces"],
+                                                  rnn_parameter["hidden_dim"],
+                                                  )
+        self.actor             = Actor(input_dim=rnn_parameter["hidden_dim"], 
+                                       output_dim=actor_parameter["action_spaces"],
+                                       )
+        self.critic            = Critic(input_dim=rnn_parameter["hidden_dim"], 
+                                        )
     # 給rollout
     def act(self, obs, rnn_hidden_state, masks):
         feature, rnn_hidden_state = self._run_cnn_rnn(obs, rnn_hidden_state, masks)
@@ -256,10 +343,16 @@ class PointNavBaselinePolicy_(nn.Module):
         value = self.critic(feature)
         return distributions_entropy, actions_log_probs, value
 
-    def evaluate_decoder(self, obs):
+    def evaluate_auxiliary(self, obs, rnn_hidden_state, action):
+        # cnn_decoder
         feature_map, _ = self.cnn(obs)
         depth_img = self.cnn_decoder(feature_map)
-        return depth_img
+        # ActionAuxiliary
+        action_predict = self.action_auxiliary(rnn_hidden_state)
+        # FeatureAuxiliary
+        next_feature_predict = self.feature_auxiliary(rnn_hidden_state, action)
+
+        return depth_img, action_predict, next_feature_predict
 
     def _run_cnn_rnn(self, obs, rnn_hidden_state, masks):
         _, feature = self.cnn(obs)

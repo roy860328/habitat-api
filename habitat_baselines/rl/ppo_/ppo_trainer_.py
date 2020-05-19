@@ -140,10 +140,10 @@ class PPOTrainer_(BaseRLTrainer):
                                      self.config.RL.PPO.use_gae, 
                                      self.config.RL.PPO.gamma, 
                                      self.config.RL.PPO.tau)
-        loss = self.agent.update(self.rollout)
+        loss, loss_auxiliary = self.agent.update(self.rollout)
         self.rollout.after_update()
 
-        return loss
+        return loss, loss_auxiliary
 
     def train(self) -> None:
         #### init
@@ -166,10 +166,13 @@ class PPOTrainer_(BaseRLTrainer):
                 for step in range(self.config.RL.PPO.num_steps):
                     rewards_record, count, metrics = self._collect_rollout_step(rewards_record, count, metrics)
                 #### 更新
-                loss = self._update_agent()
+                loss, loss_auxiliary = self._update_agent()
                 #### LOGGER
                 writer.add_scalars(
                     "loss", loss, epoch*self.envs.num_envs
+                )
+                writer.add_scalars(
+                    "loss_auxiliary", loss_auxiliary, epoch*self.envs.num_envs
                 )
                 writer.add_scalars(
                     "metrics", metrics, epoch*self.envs.num_envs

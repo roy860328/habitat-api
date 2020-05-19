@@ -37,7 +37,11 @@ class PPO_(nn.Module):
         loss = 0
         advantages = self.get_advantages(rollout)
 
-        print("=== UPDATE ===")
+        print("=== UPDATE Auxiliary ===")
+
+        loss_auxiliary = self.update_auxiliary(rollout, advantages)
+
+        print("=== UPDATE PPO ===")
 
         for epoch in range(self.config.RL.PPO.ppo_epoch):
             print("=== epoch {} ===".format(epoch))
@@ -63,8 +67,6 @@ class PPO_(nn.Module):
                                                      actions_batch,
                                                      recurrent_hidden_states_batch,
                                                      masks_batch)
-                depth_img = self.actor_critic.evaluate_decoder(observations_batch, 
-                                                               )
                 # print("return_batch:", return_batch)
                 # print("value:", value)
 
@@ -79,17 +81,13 @@ class PPO_(nn.Module):
                 # values_loss
                 values_loss  = 0.5 * (return_batch - value).pow(2).mean()
 
-                # depth img predict loss
-                depth_img_loss = self.reconstruction_function(depth_img, 
-                                                              observations_batch["depth"])
-
                 # optimizer
                 self.optimizer.zero_grad()
                 # total_loss
                 total_loss = (actions_loss
                               + values_loss * self.value_loss_coef 
                               - distributions_entropy * self.entropy_coef
-                              + depth_img_loss)
+                              )
                 total_loss.backward()
 
                 self.optimizer.step()
@@ -99,11 +97,71 @@ class PPO_(nn.Module):
         print("actions_loss:", actions_loss)
         print("values_loss:", values_loss)
         print("distributions_entropy:", distributions_entropy)
-        print("depth_img_loss:", depth_img_loss)
         loss_dict = {"loss":loss,
                      "actions_loss":actions_loss,
                      "values_loss":values_loss,
                      "distributions_entropy":distributions_entropy.detach(),
-                     "depth_img_loss":depth_img_loss,
                      }
-        return loss_dict
+        return loss_dict, loss_auxiliary
+
+    def update_auxiliary(self, rollout, advantages):
+        loss = 0
+        data_generator = rollout.recurrent_generator(advantages, self.config.RL.PPO.num_mini_batch)
+        for mini_batch in data_generator:
+            (
+                observations_batch,
+                recurrent_hidden_states_batch,
+                actions_batch,
+                prev_actions_batch,
+                value_preds_batch,
+                return_batch,
+                masks_batch,
+                old_action_log_probs_batch,
+                adv_targ,
+            ) = mini_batch
+
+            b, i = actions_batch.size()
+            actions_tensor = torch.zeros((b, 4))
+            actions_tensor[torch.arange(b), actions_batch.view(-1)] = 1
+            # evaluate_auxiliary
+            depth_img, actions_predict, next_feature_predict = \
+                self.actor_critic.evaluate_auxiliary(observations_batch,
+                                                     recurrent_hidden_states_batch,
+                                                     actions_tensor,
+                                                     )
+            depth_img_loss = self.reconstruction_function(depth_img, 
+                                                          observations_batch["depth"]
+                                                          )
+
+            # action predict loss
+            action_predict_loss = torch.nn.functional.cross_entropy(actions_predict, 
+                                                                    actions_batch[:-1].view(-1),
+                                                                    )
+            # next feature predict loss
+            next_feature_predict_loss = 1 - torch.nn.functional.cosine_similarity(recurrent_hidden_states_batch.squeeze(0)[1:],
+                                                                                  next_feature_predict,
+                                                                                  ).mean()
+            # optimizer
+            self.optimizer.zero_grad()
+            # total_loss
+            total_loss = (depth_img_loss
+                          + action_predict_loss
+                          + next_feature_predict_loss
+                          )
+            total_loss.backward()
+
+            self.optimizer.step()
+
+            loss += total_loss.item()
+
+        print("loss:", loss)
+        print("depth_img_loss:", depth_img_loss)
+        print("action_predict_loss:", action_predict_loss)
+        print("next_feature_predict_loss:", next_feature_predict_loss)
+        loss_auxiliary = {"loss":loss,
+                          "depth_img_loss":depth_img_loss,
+                          "action_predict_loss":action_predict_loss,
+                          "next_feature_predict_loss":next_feature_predict_loss,
+                          }
+
+        return loss_auxiliary
