@@ -288,29 +288,38 @@ class CustomCategorical(torch.distributions.Categorical):
         )
 
 class PointNavBaselinePolicy_(nn.Module):
-    def __init__(self, cnn_parameter, depth_decoder_parameter, rnn_parameter, actor_parameter, critic_parameter):
+    def __init__(self, 
+                 cnn_parameter, 
+                 depth_decoder_parameter, 
+                 rnn_parameter, 
+                 actor_parameter, 
+                 critic_parameter,
+                 use_splitnet_auxiliary=False):
         super().__init__()
         self.cnn               = CNN_encoder(rgb_input=cnn_parameter["observation_spaces"].spaces["depth"].shape[2], 
                                              feature_dim=cnn_parameter["feature_dim"]
-                                             )
-        self.cnn_decoder       = CNN_decoder(
                                              )
         input_dim              = cnn_parameter["feature_dim"] + cnn_parameter["observation_spaces"].spaces["pointgoal_with_gps_compass"].shape[0]
         self.rnn               = RNN_encoder(input_dim=input_dim, 
                                              hidden_dim=rnn_parameter["hidden_dim"], 
                                              n_layer=rnn_parameter["n_layer"],
                                              )
-        self.action_auxiliary  = ActionAuxiliary(rnn_parameter["hidden_dim"]*2,
-                                                 actor_parameter["action_spaces"]
-                                                 )
-        self.feature_auxiliary = FeatureAuxiliary(rnn_parameter["hidden_dim"] + actor_parameter["action_spaces"],
-                                                  rnn_parameter["hidden_dim"],
-                                                  )
         self.actor             = Actor(input_dim=rnn_parameter["hidden_dim"], 
                                        output_dim=actor_parameter["action_spaces"],
                                        )
         self.critic            = Critic(input_dim=rnn_parameter["hidden_dim"], 
                                         )
+        
+        self.use_splitnet_auxiliary = use_splitnet_auxiliary
+        if use_splitnet_auxiliary:
+            self.cnn_decoder       = CNN_decoder(
+                                                 )
+            self.action_auxiliary  = ActionAuxiliary(rnn_parameter["hidden_dim"]*2,
+                                                     actor_parameter["action_spaces"]
+                                                     )
+            self.feature_auxiliary = FeatureAuxiliary(rnn_parameter["hidden_dim"] + actor_parameter["action_spaces"],
+                                                      rnn_parameter["hidden_dim"],
+                                                      )
     # 給rollout
     def act(self, obs, rnn_hidden_state, masks):
         feature, rnn_hidden_state = self._run_cnn_rnn(obs, rnn_hidden_state, masks)

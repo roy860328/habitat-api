@@ -39,7 +39,7 @@ class PPOTrainer_(BaseRLTrainer):
         self.envs = construct_envs(
             self.config, get_env_class(self.config.ENV_NAME)
         )
-        self._setup_actor_critic()
+        self._setup_actor_critic_agent(self.config)
         self.rollout = RolloutStorage(
                         self.config.RL.PPO.num_steps,
                         self.envs.num_envs,
@@ -54,7 +54,7 @@ class PPOTrainer_(BaseRLTrainer):
         )
         self.rollout.to(self.device)
 
-    def _setup_actor_critic(self):
+    def _setup_actor_critic_agent(self, ppo_cfg):
         print(self.config)
         # len(observation_spaces)==NUM_PROCESSES==4?
         print(self.envs.observation_spaces[0])
@@ -65,11 +65,13 @@ class PPOTrainer_(BaseRLTrainer):
                             rnn_parameter={"input_dim":0, "hidden_dim":self.config.RL.PPO.hidden_size, "n_layer":1},
                             actor_parameter={"action_spaces":4, },
                             critic_parameter={},
+                            use_splitnet_auxiliary=self.config.RL.PPO.use_splitnet_auxiliary,
                             )
         self.agent = PPO_(self.actor_critic,
-                          self.config, )
+                          self.config,
+                          )
 
-    def _collect_rollout_step(self, rewards_record, count, metrics):
+    def _collect_rollout_step(self, current_episode_reward, running_episode_stats):
         '''
         obss :   "rgb"
                  "depth"
@@ -85,9 +87,6 @@ class PPOTrainer_(BaseRLTrainer):
              value, 
              distributions, 
              rnn_hidden_state) = (self.actor_critic.act(obs, hidden_states, inverse_dones))
-        # print("distributions:", distributions)
-        # print("max distributions:", torch.max(distributions, 1)[1])
-        # print("actions:", actions)
         ### PASS ENV
         res = self.envs.step([action.item() for action in actions])
 
@@ -108,16 +107,22 @@ class PPOTrainer_(BaseRLTrainer):
                             )
         # print("rewards:", rewards)
         # print("dones:", dones)
-        if rewards_record is None:
-            rewards_record, count = rewards, dones
-        else:
-            rewards_record += rewards
-            count += dones
-        for i, done in enumerate(dones):
-            if done:
-                for k, v in infos[i].items():
-                    metrics[k] = (metrics[k]+v)/2
-        return rewards_record, count, metrics
+        current_episode_reward += rewards
+        running_episode_stats["reward"] += (1 - inverse_dones) * current_episode_reward
+        running_episode_stats["count"] += 1 - inverse_dones
+        for k, v in self._extract_scalars_from_infos(infos).items():
+            v = torch.tensor(
+                v, dtype=torch.float, device=current_episode_reward.device
+            ).unsqueeze(1)
+            if k not in running_episode_stats:
+                running_episode_stats[k] = torch.zeros_like(
+                    running_episode_stats["count"]
+                )
+
+            running_episode_stats[k] += (1 - inverse_dones) * v
+
+        current_episode_reward *= inverse_dones
+        return
 
     def _save_checkpoint(self, checkpoint_name):
         checkpoint_dict = {"state_dict": self.agent.state_dict(),
@@ -126,6 +131,8 @@ class PPOTrainer_(BaseRLTrainer):
         torch.save(checkpoint_dict, 
                    os.path.join(self.config.CHECKPOINT_FOLDER, checkpoint_name),
                    )
+    def load_checkpoint(self, checkpoint_path, *args, **kwargs):
+        return torch.load(checkpoint_path, *args, **kwargs)
 
     def _update_agent(self):
         with torch.no_grad():
@@ -153,18 +160,38 @@ class PPOTrainer_(BaseRLTrainer):
         for sensor in self.rollout.observations:
             self.rollout.observations[sensor][0].copy_(batch[sensor])
         #### Para
-        rewards_record = None
-        count = None
-        metrics = defaultdict(float)
+        lr_scheduler = LambdaLR(
+            optimizer=self.agent.optimizer,
+            lr_lambda=lambda x: linear_decay(x, self.config.NUM_UPDATES),
+        )
+        #### PPO LOG PARA
+        count_steps = 0
+        current_episode_reward = torch.zeros(self.envs.num_envs, 1)
+        running_episode_stats = dict(
+            count=torch.zeros(self.envs.num_envs, 1),
+            reward=torch.zeros(self.envs.num_envs, 1),
+        )
+        window_episode_stats = defaultdict(
+            lambda: deque(maxlen=self.config.RL.PPO.reward_window_size)
+        )
+        
         #### 開始訓練
         with TensorboardWriter(
-            "tb_example", flush_secs=self.flush_secs
+            self.config.TENSORBOARD_DIR, flush_secs=self.flush_secs
         ) as writer:
             for epoch in range(self.config.NUM_UPDATES):
+                #### decay
+                # if self.config.RL.PPO.use_linear_lr_decay:
+                #     lr_scheduler.step()
+                if (epoch+1) % self.config.CHECKPOINT_INTERVAL==0:
+                    self.agent.entropy_coef = self.agent.entropy_coef*0.9
+                print(self.agent.entropy_coef)
+
                 #### 蒐集rollout
                 print("=== collect rollout ===")
                 for step in range(self.config.RL.PPO.num_steps):
-                    rewards_record, count, metrics = self._collect_rollout_step(rewards_record, count, metrics)
+                    self._collect_rollout_step(current_episode_reward, running_episode_stats)
+                    count_steps += self.envs.num_envs
                 #### 更新
                 loss, loss_auxiliary = self._update_agent()
                 #### LOGGER
@@ -174,24 +201,272 @@ class PPOTrainer_(BaseRLTrainer):
                 writer.add_scalars(
                     "loss_auxiliary", loss_auxiliary, epoch*self.envs.num_envs
                 )
-                writer.add_scalars(
-                    "metrics", metrics, epoch*self.envs.num_envs
-                )
+
+                #### PPO LOG PARA
+                for k, v in running_episode_stats.items():
+                    window_episode_stats[k].append(v.clone())
+
+                deltas = {
+                    k: (
+                        (v[-1] - v[0]).sum().item()
+                        if len(v) > 1
+                        else v[0].sum().item()
+                    )
+                    for k, v in window_episode_stats.items()
+                }
+                deltas["count"] = max(deltas["count"], 1.0)
+
                 writer.add_scalar(
-                    "reward", rewards_record.sum()/self.envs.num_envs, epoch
+                    "reward", deltas["reward"] / deltas["count"], count_steps
                 )
-                writer.add_scalar(
-                    "count", count.sum()/self.envs.num_envs, epoch
-                )
+                metrics = {
+                    k: v / deltas["count"]
+                    for k, v in deltas.items()
+                    if k not in {"reward", "count"}
+                }
+                if len(metrics) > 0:
+                    writer.add_scalars("metrics", metrics, count_steps)
+                #### PPO LOG PARA
+
                 if epoch%(1) == 0:
-                    print("rewards_record:", rewards_record.sum())
-                    print("count:", count.sum())
+                    print("count_steps:", count_steps)
+                    print("deltas:", deltas)
                     print("metrics:", metrics)
-                    rewards_record = None
-                    count = None
                 if epoch%self.config.CHECKPOINT_INTERVAL == 0:
                     self._save_checkpoint(f"checkpoint.{epoch}.pth")
+
         self.envs.close()
 
+    # 每個checkpoint call一次
+    # TEST_EPISODE_COUNT 跑幾次EPISODE
+    # 還沒結束就將observations存到rgb_frames中，並且做後處裡，top_down_map...
+    # Dones之後，generate_video，存到disk跟tensorboard
     def _eval_checkpoint(self, checkpoint_path: str, writer: TensorboardWriter, checkpoint_index: int = 0, ) -> None:
-        pass
+        r"""Evaluates a single checkpoint.
+
+        Args:
+            checkpoint_path: path of checkpoint
+            writer: tensorboard writer object for logging to tensorboard
+            checkpoint_index: index of cur checkpoint for logging
+
+        Returns:
+            None
+        """
+        # Map location CPU is almost always better than mapping to a CUDA device.
+        ckpt_dict = self.load_checkpoint(checkpoint_path, map_location="cpu")
+
+        if self.config.EVAL.USE_CKPT_CONFIG:
+            config = self._setup_eval_config(ckpt_dict["config"])
+        else:
+            config = self.config.clone()
+
+        ppo_cfg = config.RL.PPO
+
+        config.defrost()
+        config.TASK_CONFIG.DATASET.SPLIT = config.EVAL.SPLIT
+        config.freeze()
+
+        if len(self.config.VIDEO_OPTION) > 0:
+            config.defrost()
+            config.TASK_CONFIG.TASK.MEASUREMENTS.append("TOP_DOWN_MAP")
+            config.TASK_CONFIG.TASK.MEASUREMENTS.append("COLLISIONS")
+            config.freeze()
+
+        logger.info(f"env config: {config}")
+        self.envs = construct_envs(config, get_env_class(config.ENV_NAME))
+        self._setup_actor_critic_agent(ppo_cfg)
+
+        self.agent.load_state_dict(ckpt_dict["state_dict"])
+        self.actor_critic = self.agent.actor_critic
+
+        observations = self.envs.reset()
+        batch = batch_obs(observations, device=self.device)
+
+        current_episode_reward = torch.zeros(
+            self.envs.num_envs, 1, device=self.device
+        )
+
+        test_recurrent_hidden_states = torch.zeros(
+            1,
+            self.config.NUM_PROCESSES,
+            ppo_cfg.hidden_size,
+            device=self.device,
+        )
+        prev_actions = torch.zeros(
+            self.config.NUM_PROCESSES, 1, device=self.device, dtype=torch.long
+        )
+        not_done_masks = torch.zeros(
+            self.config.NUM_PROCESSES, 1, device=self.device
+        )
+        stats_episodes = dict()  # dict of dicts that stores stats per episode
+
+        rgb_frames = [
+            [] for _ in range(self.config.NUM_PROCESSES)
+        ]  # type: List[List[np.ndarray]]
+        if len(self.config.VIDEO_OPTION) > 0:
+            os.makedirs(self.config.VIDEO_DIR, exist_ok=True)
+
+        pbar = tqdm.tqdm(total=self.config.TEST_EPISODE_COUNT)
+        self.actor_critic.eval()
+        while (
+            len(stats_episodes) < self.config.TEST_EPISODE_COUNT
+            and self.envs.num_envs > 0
+        ):
+            current_episodes = self.envs.current_episodes()
+
+            with torch.no_grad():
+                (_, 
+                 actions, 
+                 _, 
+                 _, 
+                 test_recurrent_hidden_states) = (self.actor_critic.act(batch, test_recurrent_hidden_states, not_done_masks))
+
+                prev_actions.copy_(actions)
+
+            outputs = self.envs.step([a[0].item() for a in actions])
+
+            observations, rewards, dones, infos = [
+                list(x) for x in zip(*outputs)
+            ]
+            batch = batch_obs(observations, device=self.device)
+            not_done_masks = torch.tensor(
+                [[0.0] if done else [1.0] for done in dones],
+                dtype=torch.float,
+                device=self.device,
+            )
+
+            rewards = torch.tensor(
+                rewards, dtype=torch.float, device=self.device
+            ).unsqueeze(1)
+            current_episode_reward += rewards
+            next_episodes = self.envs.current_episodes()
+            envs_to_pause = []
+            n_envs = self.envs.num_envs
+            for i in range(n_envs):
+                if (
+                    next_episodes[i].scene_id,
+                    next_episodes[i].episode_id,
+                ) in stats_episodes:
+                    envs_to_pause.append(i)
+
+                # episode ended
+                if not_done_masks[i].item() == 0:
+                    pbar.update()
+                    episode_stats = dict()
+                    episode_stats["reward"] = current_episode_reward[i].item()
+                    episode_stats.update(
+                        self._extract_scalars_from_info(infos[i])
+                    )
+                    current_episode_reward[i] = 0
+                    # use scene_id + episode_id as unique id for storing stats
+                    stats_episodes[
+                        (
+                            current_episodes[i].scene_id,
+                            current_episodes[i].episode_id,
+                        )
+                    ] = episode_stats
+
+                    if len(self.config.VIDEO_OPTION) > 0:
+                        generate_video(
+                            video_option=self.config.VIDEO_OPTION,
+                            video_dir=self.config.VIDEO_DIR,
+                            images=rgb_frames[i],
+                            episode_id=current_episodes[i].episode_id,
+                            checkpoint_idx=checkpoint_index,
+                            metrics=self._extract_scalars_from_info(infos[i]),
+                            tb_writer=writer,
+                        )
+
+                        rgb_frames[i] = []
+
+                # episode continues
+                elif len(self.config.VIDEO_OPTION) > 0:
+                    frame = observations_to_image(observations[i], infos[i])
+                    rgb_frames[i].append(frame)
+
+            (
+                self.envs,
+                test_recurrent_hidden_states,
+                not_done_masks,
+                current_episode_reward,
+                prev_actions,
+                batch,
+                rgb_frames,
+            ) = self._pause_envs(
+                envs_to_pause,
+                self.envs,
+                test_recurrent_hidden_states,
+                not_done_masks,
+                current_episode_reward,
+                prev_actions,
+                batch,
+                rgb_frames,
+            )
+
+        num_episodes = len(stats_episodes)
+        aggregated_stats = dict()
+        for stat_key in next(iter(stats_episodes.values())).keys():
+            aggregated_stats[stat_key] = (
+                sum([v[stat_key] for v in stats_episodes.values()])
+                / num_episodes
+            )
+
+        for k, v in aggregated_stats.items():
+            logger.info(f"Average episode {k}: {v:.4f}")
+
+        step_id = checkpoint_index
+        if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
+            step_id = ckpt_dict["extra_state"]["step"]
+
+        writer.add_scalars(
+            "eval_reward",
+            {"average reward": aggregated_stats["reward"]},
+            step_id,
+        )
+
+        metrics = {k: v for k, v in aggregated_stats.items() if k != "reward"}
+        if len(metrics) > 0:
+            writer.add_scalars("eval_metrics", metrics, step_id)
+
+        self.envs.close()
+
+    METRICS_BLACKLIST = {"top_down_map", "collisions.is_collision"}
+
+    @classmethod
+    def _extract_scalars_from_info(
+        cls, info: Dict[str, Any]
+    ) -> Dict[str, float]:
+        result = {}
+        for k, v in info.items():
+
+            if k in cls.METRICS_BLACKLIST:
+                continue
+
+            if isinstance(v, dict):
+                result.update(
+                    {
+                        k + "." + subk: subv
+                        for subk, subv in cls._extract_scalars_from_info(
+                            v
+                        ).items()
+                        if (k + "." + subk) not in cls.METRICS_BLACKLIST
+                    }
+                )
+            # Things that are scalar-like will have an np.size of 1.
+            # Strings also have an np.size of 1, so explicitly ban those
+            elif np.size(v) == 1 and not isinstance(v, str):
+                result[k] = float(v)
+
+        return result
+
+    @classmethod
+    def _extract_scalars_from_infos(
+        cls, infos: List[Dict[str, Any]]
+    ) -> Dict[str, List[float]]:
+
+        results = defaultdict(list)
+        for i in range(len(infos)):
+            for k, v in cls._extract_scalars_from_info(infos[i]).items():
+                results[k].append(v)
+
+        return results

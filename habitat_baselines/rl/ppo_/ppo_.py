@@ -34,12 +34,14 @@ class PPO_(nn.Module):
         return (advantages - advantages.mean()) / (advantages.std() + EPS_PPO)
 
     def update(self, rollout):
+
         loss = 0
         advantages = self.get_advantages(rollout)
 
         print("=== UPDATE Auxiliary ===")
-
-        loss_auxiliary = self.update_auxiliary(rollout, advantages)
+        loss_auxiliary = {}
+        if self.actor_critic.use_splitnet_auxiliary:
+            loss_auxiliary = self.update_auxiliary(rollout, advantages)
 
         print("=== UPDATE PPO ===")
 

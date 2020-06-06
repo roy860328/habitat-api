@@ -4,13 +4,13 @@ ENV_NAME: "NavRLEnv"
 SIMULATOR_GPU_ID: 0
 TORCH_GPU_ID: 0
 VIDEO_OPTION: ["disk", "tensorboard"]
-TENSORBOARD_DIR: "tb_example"
+TENSORBOARD_DIR: "tb_example_t"
 VIDEO_DIR: "video_dir"
 TEST_EPISODE_COUNT: 2
-EVAL_CKPT_PATH_DIR: "data/example/new_checkpoints"
+EVAL_CKPT_PATH_DIR: "data/example/new_checkpoints_t"
 NUM_PROCESSES: 2
 SENSORS: ["RGB_SENSOR", "DEPTH_SENSOR"]
-CHECKPOINT_FOLDER: "data/example/new_checkpoints"
+CHECKPOINT_FOLDER: "data/example/new_checkpoints_t"
 NUM_UPDATES: 10000
 LOG_INTERVAL: 10
 CHECKPOINT_INTERVAL: 500
@@ -35,5 +35,5 @@ RL:
     use_linear_clip_decay: True
     use_linear_lr_decay: True
     reward_window_size: 50
-    # depth decoder
-    
+
+    use_splitnet_auxiliary: True
