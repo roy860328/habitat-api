@@ -181,8 +181,8 @@ class PPOTrainer_(BaseRLTrainer):
         ) as writer:
             for epoch in range(self.config.NUM_UPDATES):
                 #### decay
-                # if self.config.RL.PPO.use_linear_lr_decay:
-                #     lr_scheduler.step()
+                if self.config.RL.PPO.use_linear_lr_decay:
+                    lr_scheduler.step()
                 if (epoch+1) % self.config.CHECKPOINT_INTERVAL==0:
                     self.agent.entropy_coef = self.agent.entropy_coef*0.9
                 print(self.agent.entropy_coef)
